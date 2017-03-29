@@ -93,13 +93,26 @@ mode_t my_rights(struct stat* stbuf, uid_t uid, gid_t gid)
 }
 
 /**
+ *  Describe a block
+ */
+const unsigned BLOCK_SIZE = 5;
+
+struct block_t
+{
+    char data[BLOCK_SIZE];
+    block_t* next;
+};
+
+/**
  *  Describe a file
  */
 struct file_t
 {
     string name;
     struct stat stbuf;
-    char data[65536]; // this is not an ideal way of storing data!
+    block_t* data;
+    unsigned blocks;
+    //char data[65536]; // this is not an ideal way of storing data!
 };
 
 /**
@@ -150,31 +163,47 @@ struct dir_t
                 return &dirs[i];
         return NULL;
     }
+
+    void erase_dir(string name)
+    {
+        string tmp = name.c_str();
+        for (unsigned i = 0; i < dirs.size(); ++i) {
+            if (dirs[i].name == tmp) {
+                dirs.erase(dirs.begin() + i);
+                return;
+            }
+        }
+    }
 };
 
 /**
  *  The root directory of our filesystem
  */
 dir_t root;
-dir_t* current_dir = &root;
 
 char* saveFile;
 
 void save(std::fstream* out, dir_t* dir){
   cerr << "save" << endl;
-  for(int i = 0; i < dir->files.size(); i++){
+  for(unsigned i = 0; i < dir->files.size(); i++){
     file_t* file = &dir->files[i];
     *out << 'f' << file->name << '\0';
     out->write((char*)(&file->stbuf), sizeof(file->stbuf));
-    out->write(file->data, 65536);
+    block_t* block = file->data;
+    for(unsigned j = 0; j < file->blocks; j++){
+        *out << "c";
+        out->write(block->data, BLOCK_SIZE);
+        block = block->next;
+    }
+    *out << "e";
   }
 
-  for(int i = 0; i < dir->dirs.size(); i++){
+  for(unsigned i = 0; i < dir->dirs.size(); i++){
     dir_t* temdir = &dir->dirs[i];
     *out << 'd' << temdir->name << '\0';
     out->write((char*)(&temdir->stbuf), sizeof(temdir->stbuf));
     save(out, temdir);
-    *out << "e" << endl;
+    *out << "E";
   }
 }
 
@@ -195,7 +224,22 @@ void recover(std::fstream* in, dir_t* dir){
         cerr << temfile.name << endl;
 
         in->read((char*)(&temfile.stbuf), sizeof(temfile.stbuf));
-        in->read((char*)(&temfile.data), sizeof(temfile.data));
+
+        block_t* block;
+        temfile.blocks = 0;
+        while(in->read(&c,1)){
+            if(c=='e')break;
+            temfile.blocks++;
+            if(temfile.blocks == 1){
+                temfile.data = new block_t();
+                block = temfile.data;
+            }
+            else{
+                block->next = new block_t();
+                block = block->next;
+            }
+            in->read((char*)(&block->data), BLOCK_SIZE);
+        }
         dir->files.push_back(temfile);
     }
 
@@ -213,12 +257,12 @@ void recover(std::fstream* in, dir_t* dir){
         dir->dirs.push_back(temdir);
     }
 
-    if(c=='e')return;
+    if(c=='E')return;
   }
 }
 
 dir_t* findDir(const char* path){
-  if(strlen(path) == 0 || path == "/")return &root;
+  if(strlen(path) == 0)return &root;
   char* str =(char *)malloc(strlen(path) + 1);
   strcpy(str,path);
   dir_t* last=&root;
@@ -228,7 +272,6 @@ dir_t* findDir(const char* path){
   pch = strtok (str,"/");
   while (pch != NULL)
   {
-    printf ("%s\n",pch);
     tempath += pch;
     last = present;
     present = present->find_dir(tempath);
@@ -243,22 +286,19 @@ dir_t* findDir(const char* path){
  */
 int myfs_getattr(const char* path, struct stat* stbuf)
 {
-    cerr << "getattr " << path << endl;
+    dir_t* current_dir;
+    current_dir = findDir(path);
     if (string(path) == current_dir->name) {
         memcpy(stbuf, &current_dir->stbuf, sizeof(struct stat));
-    }
-    else if (current_dir->father != NULL && string(path) == current_dir->father->name) {
-        memcpy(stbuf, &current_dir->father->stbuf, sizeof(struct stat));
-        current_dir = current_dir->father;
     }
     else {
         file_t* file = current_dir->find_file(path);
         dir_t* dir = current_dir->find_dir(path);
         if (NULL == dir && NULL == file)
             return -ENOENT;
-        if(NULL != dir){
+        else if(NULL != dir){
           memcpy(stbuf, &dir->stbuf, sizeof(struct stat));
-          current_dir = dir;
+          cerr << "getattr" << path << "," << current_dir->name << endl;
         }
         else memcpy(stbuf, &file->stbuf, sizeof(struct stat));
     }
@@ -270,10 +310,11 @@ int myfs_getattr(const char* path, struct stat* stbuf)
  */
 int myfs_truncate(const char* path, off_t size)
 {
-    //cerr << "truncate" << endl;
     if (size > 65536)
         return -EIO;
 
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file_t* file = current_dir->find_file(path);
     if (file == NULL)
         return -ENOENT;
@@ -294,6 +335,8 @@ int myfs_rename(const char* from, const char* to)
 {
     //cerr << "rename" << endl;
     fuse_context* context;
+    dir_t* current_dir;
+    current_dir = findDir(from);
     file_t* file = current_dir->find_file(from);
     if (file == NULL)
         return -ENOENT;
@@ -310,9 +353,11 @@ int myfs_rename(const char* from, const char* to)
  */
 int myfs_unlink(const char* path)
 {
-    //cerr << "unlink" << endl;
+    cerr << "unlink" << path << endl;
     fuse_context* context;
     file_t* file;
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file = current_dir->find_file(path);
     if (file == NULL)
         return -ENOENT;
@@ -323,16 +368,34 @@ int myfs_unlink(const char* path)
     return 0;
 }
 
+int myfs_rmdir(const char* path)
+{
+    cerr << "rmdir" << path << endl;
+    fuse_context* context;
+    dir_t* dir;
+    dir_t* current_dir;
+    current_dir = findDir(path);
+    dir = current_dir->find_dir(path);
+    if (dir == NULL)
+        return -ENOENT;
+    context = fuse_get_context();
+    if (dir->stbuf.st_uid != context->uid)
+        return -EACCES;
+    current_dir->erase_dir(path);
+    return 0;
+}
+
 /**
  *  Example of how to set time
  */
 int myfs_utime(const char* path, struct utimbuf* buf)
 {
-    //cerr << "utime " << path << endl;
     fuse_context* context;
     file_t* file;
     dir_t* dir;
 
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file = current_dir->find_file(path);
     dir = current_dir->find_dir(path);
 
@@ -383,11 +446,45 @@ int myfs_utime(const char* path, struct utimbuf* buf)
 int myfs_write(const char* path, const char* buf, size_t size,
                off_t offset, fuse_file_info* fi)
 {
-    //cerr << "write" << endl;
+    cerr << "write: " << path << endl;
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file_t* file = current_dir->find_file(path);
-    if (offset+size > 65536)
-        return -EIO;
-    memcpy(&file->data[offset], buf, size);
+    //if (offset > file->blocks * BLOCK_SIZE)
+      //  return -EIO;
+    
+    unsigned begin;
+    if(file->data == NULL){
+        file->blocks = 1;
+        file->data = new block_t();
+    }
+    block_t* block = file->data;
+    for(begin = 0; begin < file->blocks; begin++){
+        if(offset - begin * BLOCK_SIZE < BLOCK_SIZE)break;
+        if(block->next == NULL){
+            file->blocks += 1;
+            block->next = new block_t();
+        }
+        block = block->next;
+    }
+    offset -= begin * BLOCK_SIZE;
+
+    unsigned current_size = 0;
+    while(current_size < size){
+        if(offset + size - current_size <= BLOCK_SIZE){
+            memcpy(&block->data[offset], buf + current_size, size - current_size);
+            break;
+        }
+        memcpy(&block->data[offset], buf + current_size, BLOCK_SIZE-offset);
+        current_size += BLOCK_SIZE-offset;
+        offset = 0;
+        if(block->next == NULL){
+            file->blocks += 1;
+            block->next = new block_t();
+        }
+        block = block->next;
+    }
+    
     int diff = offset+size-file->stbuf.st_size;
     if (diff > 0) {
         file->stbuf.st_size += diff;
@@ -402,11 +499,33 @@ int myfs_write(const char* path, const char* buf, size_t size,
 int myfs_read(const char* path, char* buf, size_t size,
               off_t offset, fuse_file_info* fi)
 {
-    //cerr << "read" << endl;
+    cerr << "read: " << path << endl;
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file_t* file = current_dir->find_file(path);
-    if ((offset + size) > 65536)
+    cerr << "read: " << offset << "," << size << endl;
+    if (offset > file->blocks * BLOCK_SIZE)
         return -EIO;
-    memcpy(buf, &file->data[offset], size);
+    unsigned begin;
+    block_t* block = file->data;
+    for(begin = 0; begin < file->blocks; begin++){
+        if(offset - begin * BLOCK_SIZE < BLOCK_SIZE)break;
+        block = block->next;
+    }
+    offset -= begin * BLOCK_SIZE;
+    
+    unsigned current_size = 0;
+    while(begin < file->blocks && current_size < size){
+        if(size - current_size + offset < BLOCK_SIZE){
+            memcpy(buf + current_size, &block->data[offset], size - current_size);
+            break;
+        }
+        memcpy(buf + current_size, &block->data[offset], BLOCK_SIZE - offset);
+        block = block->next;
+        begin++;
+        current_size += BLOCK_SIZE - offset;
+        offset = 0;
+    }
     return size;
 }
 
@@ -416,6 +535,7 @@ int myfs_read(const char* path, char* buf, size_t size,
 int myfs_mknod(const char* path, mode_t mode, dev_t dev)
 {
     //cerr << "mknod" << endl;
+    dir_t* current_dir;
     current_dir = findDir(path);
     fuse_context* context = fuse_get_context();
     file_t* newfile = new file_t();
@@ -428,7 +548,7 @@ int myfs_mknod(const char* path, mode_t mode, dev_t dev)
         newfile->stbuf.st_ctime = time(0);
     newfile->stbuf.st_uid = context->uid;
     newfile->stbuf.st_gid = context->gid;
-    newfile->stbuf.st_blksize = 65536;
+    newfile->stbuf.st_blksize = BLOCK_SIZE;
     current_dir->files.push_back(*newfile);
     return 0;
 }
@@ -440,8 +560,8 @@ int myfs_mkdir (const char* path, mode_t mode){
     if (res == -1)return -errno;
     return 0;*/
 
+    dir_t* current_dir;
     current_dir = findDir(path);
-    //cerr << "current: " << current_dir->name << endl;
     cerr << "mkdir" << current_dir->name << "|" << path << endl;
 
     fuse_context* context = fuse_get_context();
@@ -465,7 +585,9 @@ int myfs_mkdir (const char* path, mode_t mode){
 int myfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
                  off_t offset, fuse_file_info* fi)
 {
-    //cerr << "readdir " << path << endl;
+    dir_t* current_dir;
+    current_dir = findDir(path);
+    if(string(path) != current_dir->name)current_dir = current_dir->find_dir(path);
     // first put in '.' and '..'
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
@@ -487,8 +609,9 @@ int myfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
  */
 int myfs_open(const char* path, fuse_file_info* fi)
 {
-    //cerr << "open " << path << endl;
     fuse_context* context;
+    dir_t* current_dir;
+    current_dir = findDir(path);
     file_t* file = current_dir->find_file(path);
 
     if (file == NULL)
@@ -512,16 +635,13 @@ int myfs_open(const char* path, fuse_file_info* fi)
  */
 int myfs_opendir(const char* path, fuse_file_info* fi)
 {
+    dir_t* current_dir;
     current_dir = findDir(path);
-    cerr << "open dir " << path << " | " << current_dir->name << endl;
     dir_t* dir;
     fuse_context* context;
 
-    if (string(path) == current_dir->name) {
-        dir = current_dir;
-    }
-    else if (string(path).length() < string(current_dir->name).length()){
-        dir = current_dir->father;
+    if (string(path) == "/") {
+        dir = &root;
     }
     else{
         dir = current_dir->find_dir(path);
@@ -530,7 +650,7 @@ int myfs_opendir(const char* path, fuse_file_info* fi)
     if (dir == NULL)
         return -ENOENT;
 
-    //cerr << "open dir " << path << " | " << current_dir->name << endl;
+    cerr << "opendir" << path << "," << dir->name << endl;
 
     context = fuse_get_context();
     if (context->uid != 0) {
@@ -542,8 +662,6 @@ int myfs_opendir(const char* path, fuse_file_info* fi)
     }
 
     fi->fh = (unsigned long)dir;
-
-    current_dir = dir;
 
     return 0;
 }
@@ -582,7 +700,6 @@ void* myfs_init(fuse_conn_info* conn)
     std::fstream in(saveFile,std::ios::in | std::ios::binary );
     recover(&in,&root);
     in.close();
-    current_dir = &root;
     return NULL;
 }
 
@@ -619,6 +736,7 @@ void pre_init()
     myfs_ops.write = myfs_write;
     myfs_ops.utime = myfs_utime;
     myfs_ops.unlink = myfs_unlink;
+    myfs_ops.rmdir = myfs_rmdir;
     myfs_ops.rename = myfs_rename;
     //info();
 }
