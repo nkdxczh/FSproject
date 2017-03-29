@@ -184,7 +184,7 @@ dir_t root;
 char* saveFile;
 
 void save(std::fstream* out, dir_t* dir){
-  cerr << "save" << endl;
+  if(saveFile == NULL)return;
   for(unsigned i = 0; i < dir->files.size(); i++){
     file_t* file = &dir->files[i];
     *out << 'f' << file->name << '\0';
@@ -209,6 +209,7 @@ void save(std::fstream* out, dir_t* dir){
 
 void recover(std::fstream* in, dir_t* dir){
   cerr << "recover " << dir->name << endl;
+  if(saveFile == NULL)return;
   char c;
   file_t temfile;
   dir_t temdir;
@@ -298,7 +299,6 @@ int myfs_getattr(const char* path, struct stat* stbuf)
             return -ENOENT;
         else if(NULL != dir){
           memcpy(stbuf, &dir->stbuf, sizeof(struct stat));
-          cerr << "getattr" << path << "," << current_dir->name << endl;
         }
         else memcpy(stbuf, &file->stbuf, sizeof(struct stat));
     }
@@ -650,8 +650,6 @@ int myfs_opendir(const char* path, fuse_file_info* fi)
     if (dir == NULL)
         return -ENOENT;
 
-    cerr << "opendir" << path << "," << dir->name << endl;
-
     context = fuse_get_context();
     if (context->uid != 0) {
         mode_t rights = my_rights(&dir->stbuf, context->uid, context->gid);
@@ -738,7 +736,6 @@ void pre_init()
     myfs_ops.unlink = myfs_unlink;
     myfs_ops.rmdir = myfs_rmdir;
     myfs_ops.rename = myfs_rename;
-    //info();
 }
 
 /**
@@ -748,7 +745,9 @@ void pre_init()
 int main(int argc, char* argv[])
 {
     pre_init();
-    argc -= 1;
-    saveFile = argv[3];
+    if(argc == 4){
+        saveFile = argv[3];
+        argc -= 1;
+    }
     return fuse_main(argc, argv, &myfs_ops, NULL);
 }
