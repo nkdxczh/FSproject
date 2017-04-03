@@ -6,7 +6,7 @@ This code takes the second parameter (the first parameter is mount point) as the
 
 The code supprot directory commands.
 
-The new file system save every file's data in a block linked list in order to support big file. The number of blocks would automatically increase if there's no more space for appending. Every block's size is set to 20 charaters.
+The new file system save every file's data in a block linked list in order to support big file. The number of blocks would automatically increase if there's no more space for appending. Every block's size is set to 5 charaters now for testing. You could change the BLOCK_SIZE variable to reset it.
 
 Make & Run:
 
